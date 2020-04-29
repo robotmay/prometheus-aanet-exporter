@@ -10,6 +10,49 @@ require "sinatra"
 require "sinatra/config_file"
 require "yaml"
 
+# Metrics wrapper class for convenience
+class Metrics
+  attr_reader :registry
+  attr_reader :tx_bytes_to_date
+  attr_reader :rx_bytes_to_date
+  attr_reader :tx_pkts_to_date
+  attr_reader :rx_pkts_to_date
+  attr_reader :tx_drops_to_date
+  attr_reader :min_latency_ns
+  attr_reader :avg_latency_ns
+  attr_reader :max_latency_ns
+  attr_reader :avg_rx_bps
+  attr_reader :avg_tx_bps
+  attr_reader :score
+  attr_reader :sent_polls
+  attr_reader :lost_polls
+
+  def initialize
+    @registry = Prometheus::Client.registry
+
+    # General metrics
+    @tx_bytes_to_date = @registry.gauge(:aanet_tx_bytes_to_date, docstring: "Transmitted bytes to date")
+    @rx_bytes_to_date = @registry.gauge(:aanet_rx_bytes_to_date, docstring: "Received bytes to date")
+    @tx_pkts_to_date  = @registry.gauge(:aanet_tx_pkts_to_date, docstring: "Transmitted packets to date")
+    @rx_pkts_to_date  = @registry.gauge(:aanet_rx_pkts_to_date, docstring: "Received packets to date")
+    @tx_drops_to_date = @registry.gauge(:aanet_tx_drops_to_date, docstring: "Packet transmission failures to date")
+
+    # Metrics from the most recent record returned
+    @min_latency_ns = @registry.gauge(:aanet_min_latency_ns, docstring: "Minimum latency in nanoseconds from most recent record")
+    @avg_latency_ns = @registry.gauge(:aanet_avg_latency_ns, docstring: "Average latency in nanoseconds from most recent record")
+    @max_latency_ns = @registry.gauge(:aanet_max_latency_ns, docstring: "Maximum latency in nanoseconds from most recent record")
+    @avg_rx_bps     = @registry.gauge(:aanet_avg_rx_bps, docstring: "Average bytes per second received from most recent record")
+    @avg_tx_bps     = @registry.gauge(:aanet_avg_tx_bps, docstring: "Average bytes per second transmitted from most recent record")
+    @score          = @registry.gauge(:aanet_score, docstring: "Score from most recent record")
+    @sent_polls     = @registry.gauge(:aanet_sent_polls, docstring: "Number of pings sent from most recent record")
+    @lost_polls     = @registry.gauge(:aanet_lost_polls, docstring: "Number of pings failed from most recent record")
+  end
+
+  def render
+    Prometheus::Client::Formats::Text.marshal(@registry)
+  end
+end
+
 # Settings
 set :environment, :production
 set :bind, "0.0.0.0"
@@ -18,6 +61,8 @@ set :stats_url, nil
 
 config_file "/etc/prometheus/aanet.yml"
 
+set :metrics, Metrics.new
+
 exit 0 if settings.stats_url.nil?
 
 # Routes
@@ -25,55 +70,30 @@ get "/" do
   "<a href='/metrics'>Metrics</a>"
 end
 
-before do
-  @registry = Prometheus::Client.registry
-
-  # General metrics
-  @tx_bytes_to_date = @registry.gauge(:aanet_tx_bytes_to_date, docstring: "Transmitted bytes to date")
-  @rx_bytes_to_date = @registry.gauge(:aanet_rx_bytes_to_date, docstring: "Received bytes to date")
-  @tx_pkts_to_date  = @registry.gauge(:aanet_tx_pkts_to_date, docstring: "Transmitted packets to date")
-  @rx_pkts_to_date  = @registry.gauge(:aanet_rx_pkts_to_date, docstring: "Received packets to date")
-  @tx_drops_to_date = @registry.gauge(:aanet_tx_drops_to_date, docstring: "Packet transmission failures to date")
-
-  # Metrics from the most recent record returned
-  @min_latency_ns = @registry.gauge(:aanet_min_latency_ns, docstring: "Minimum latency in nanoseconds from most recent record")
-  @avg_latency_ns = @registry.gauge(:aanet_avg_latency_ns, docstring: "Average latency in nanoseconds from most recent record")
-  @max_latency_ns = @registry.gauge(:aanet_max_latency_ns, docstring: "Maximum latency in nanoseconds from most recent record")
-  @avg_rx_bps     = @registry.gauge(:aanet_avg_rx_bps, docstring: "Average bytes per second received from most recent record")
-  @avg_tx_bps     = @registry.gauge(:aanet_avg_tx_bps, docstring: "Average bytes per second transmitted from most recent record")
-  @score          = @registry.gauge(:aanet_score, docstring: "Score from most recent record")
-
-  # Counters across all records
-  @sent_polls = @registry.counter(:aanet_sent_polls, docstring: "Number of pings sent")
-  @lost_polls = @registry.counter(:aanet_lost_polls, docstring: "Number of pings failed")
-end
-
 get "/metrics" do
   stats_doc = HTTParty.get(settings.stats_url)
+  metrics = settings.metrics
 
   if stats_doc.success?
     _, cqm = *stats_doc.first
     graph = cqm["graph"]
 
-    @tx_bytes_to_date.set(graph["tx_bytes_to_date"].to_i)
-    @rx_bytes_to_date.set(graph["rx_bytes_to_date"].to_i)
-    @tx_pkts_to_date.set(graph["tx_pkts_to_date"].to_i)
-    @rx_pkts_to_date.set(graph["rx_pkts_to_date"].to_i)
-    @tx_drops_to_date.set(graph["tx_drops_to_date"].to_i)
-
-    graph["record"].each do |record|
-      @sent_polls.increment(by: record["sent_polls"].to_i)
-      @lost_polls.increment(by: record["lost_polls"].to_i)
-    end
+    metrics.tx_bytes_to_date.set(graph["tx_bytes_to_date"].to_i)
+    metrics.rx_bytes_to_date.set(graph["rx_bytes_to_date"].to_i)
+    metrics.tx_pkts_to_date.set(graph["tx_pkts_to_date"].to_i)
+    metrics.rx_pkts_to_date.set(graph["rx_pkts_to_date"].to_i)
+    metrics.tx_drops_to_date.set(graph["tx_drops_to_date"].to_i)
 
     graph["record"].last.tap do |record|
-      @min_latency_ns.set(record["min_latency_ns"].to_i)
-      @avg_latency_ns.set(record["ave_latency_ns"].to_i)
-      @max_latency_ns.set(record["max_latency_ns"].to_i)
-      @avg_rx_bps.set(record["ave_rx_bps"].to_i)
-      @avg_tx_bps.set(record["ave_tx_bps"].to_i)
+      metrics.min_latency_ns.set(record["min_latency_ns"].to_i)
+      metrics.avg_latency_ns.set(record["ave_latency_ns"].to_i)
+      metrics.max_latency_ns.set(record["max_latency_ns"].to_i)
+      metrics.avg_rx_bps.set(record["ave_rx_bps"].to_i)
+      metrics.avg_tx_bps.set(record["ave_tx_bps"].to_i)
+      metrics.sent_polls.set(record["sent_polls"].to_i)
+      metrics.lost_polls.set(record["lost_polls"].to_i)
     end
   end
 
-  Prometheus::Client::Formats::Text.marshal(@registry)
+  metrics.render
 end
